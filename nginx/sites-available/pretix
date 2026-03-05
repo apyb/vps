@@ -1,7 +1,7 @@
 server {
         listen 80 default_server;
         listen [::]:80 ipv6only=on default_server;
-        server_name pretix.python.org.br;
+        server_name ingressos.python.org.br;
 
         # Redireciona tudo para HTTPS
         location / {
@@ -12,11 +12,11 @@ server {
 server {
         listen 443 ssl default_server;
         listen [::]:443 ipv6only=on ssl default_server;
-        server_name pretix.python.org.br;
+        server_name ingressos.python.org.br;
 
         # Caminhos do Certificado
-        ssl_certificate /etc/letsencrypt/live/pretix.python.org.br/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/pretix.python.org.br/privkey.pem;
+        ssl_certificate /etc/letsencrypt/live/ingressos.python.org.br/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/ingressos.python.org.br/privkey.pem;
 
         # Otimização para Cloudflare
         ssl_protocols TLSv1.2 TLSv1.3;
