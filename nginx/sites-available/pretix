@@ -1,0 +1,34 @@
+server {
+        listen 80 default_server;
+        listen [::]:80 ipv6only=on default_server;
+        server_name pretix.python.org.br;
+
+        # Redireciona tudo para HTTPS
+        location / {
+                return 301 https://$host$request_uri;
+        }
+}
+
+server {
+        listen 443 ssl default_server;
+        listen [::]:443 ipv6only=on ssl default_server;
+        server_name pretix.python.org.br;
+
+        # Caminhos do Certificado
+        ssl_certificate /etc/letsencrypt/live/pretix.python.org.br/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/pretix.python.org.br/privkey.pem;
+
+        # Otimização para Cloudflare
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        # Aumentar tamanho máximo de upload (importante para o Pretix)
+        client_max_body_size 100M;
+
+        location / {
+                proxy_pass http://localhost:8345;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+        }
+}
