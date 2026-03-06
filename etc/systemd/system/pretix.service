@@ -12,7 +12,7 @@ ExecStart=/usr/bin/docker run --name %n -p 127.0.0.1:8345:80 \
 -v /etc/pretix:/etc/pretix \
 -v /var/run/redis:/var/run/redis \
 --sysctl net.core.somaxconn=4096 \
-pretix/standalone:stable all
+pretix-apyb:latest all
 ExecStop=/usr/bin/docker stop %n
 
 [Install]
