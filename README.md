@@ -15,7 +15,7 @@ O repositório está organizado em duas partes:
 
 ## Pré-requisitos
 
-- Servidor Ubuntu 22.04 LTS (acesso root)
+- Servidor Ubuntu 26.04 LTS (acesso root)
 - Chave SSH pública disponível
 - Banco de dados PostgreSQL provisionado (ex: AWS RDS)
 
