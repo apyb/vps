@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script 2: Deploy do Helios Voting + SSL (Executar após o 01_hardening.sh)
+# Script 2: Deploy do Helios Voting + SSL + Templates de Email (Idempotente / Safe to Rerun)
 
 set -euo pipefail
 
@@ -15,6 +15,7 @@ SMTP_PORT="587"
 SMTP_USER="seu_usuario_smtp"
 SMTP_PASS="sua_senha_smtp"
 FROM_EMAIL="eleicoes@python.org.br"
+FROM_NAME="Eleições APyB"
 
 INSTALL_DIR="/opt/helios"
 # ==========================================
@@ -24,17 +25,113 @@ if [ "$SMTP_HOST" = "smtp.seuprovedor.com" ]; then
     exit 1
 fi
 
-echo "1/6: Clonando benadida/helios-server em $INSTALL_DIR..."
+echo "1/8: Clonando ou atualizando repositório do Helios em $INSTALL_DIR..."
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown -R apyb:apyb "$INSTALL_DIR"
 
 if [ ! -d "$INSTALL_DIR/.git" ]; then
     git clone https://github.com/benadida/helios-server.git "$INSTALL_DIR"
 else
-    git -C "$INSTALL_DIR" pull origin master
+    git -C "$INSTALL_DIR" fetch origin
+    git -C "$INSTALL_DIR" reset --hard origin/master
 fi
 
-echo "2/6: Criando Dockerfile para o Helios (Python 3.13 + uv)..."
+echo "2/8: Atualizando templates de comunicação com os eleitores em Português..."
+EMAIL_TPL_DIR="$INSTALL_DIR/helios/templates/email"
+
+# --- ETAPA 1: Convite para votar e envio de credenciais (vote_subject.txt / vote_body.txt) ---
+cat << 'EOF' > "$EMAIL_TPL_DIR/vote_subject.txt"
+[APyB] Convite para votação: {{custom_subject|safe}}
+EOF
+
+cat << 'EOF' > "$EMAIL_TPL_DIR/vote_body.txt"
+Olá, {{voter.name}},
+
+{{custom_message|safe}}
+
+========================
+COMO VOTAR
+========================
+
+Url da Eleição:
+{{election_vote_url}}
+
+Hash de Auditoria da Eleição:
+{{voter.election.hash}}
+
+{% if voter.voter_type == "password" %}Suas credenciais exclusivas de acesso:
+ID de Eleitor: {{voter.voter_login_id}}
+Senha: {{voter.voter_password}}
+
+Caso seja solicitado a se desconectar de outra conta antes de votar, basta confirmar e utilizar as credenciais acima.{% else %}Conecte-se utilizando sua conta {{voter.voter_type}}.{% endif %}
+
+{% if voter.vote_hash %}Você já possui um voto registrado nesta eleição com o código rastreador (Ballot Tracker):
+{{voter.vote_hash}}
+
+Se desejar, você pode votar novamente até o encerramento da eleição; apenas o último voto enviado será contabilizado.{% endif %}
+
+--
+Eleições APyB
+Em caso de dúvidas, entre em contato: contato@python.org.br
+EOF
+
+# --- ETAPA 2: Avisos gerais / Lembretes durante a eleição (simple_subject.txt / simple_body.txt) ---
+cat << 'EOF' > "$EMAIL_TPL_DIR/simple_subject.txt"
+[APyB] Comunicado da Eleição: {{custom_subject|safe}}
+EOF
+
+cat << 'EOF' > "$EMAIL_TPL_DIR/simple_body.txt"
+Olá, {{voter.name}},
+
+{{custom_message|safe}}
+
+========================
+INFORMAÇÕES DA ELEIÇÃO
+========================
+
+Página da Eleição:
+{{election_vote_url}}
+
+{% if voter.voter_type == "password" %}Suas credenciais de acesso:
+ID de Eleitor: {{voter.voter_login_id}}
+Senha: {{voter.voter_password}}{% endif %}
+
+--
+Eleições APyB
+EOF
+
+# --- ETAPA 3: Divulgação do Resultado Final e Auditoria (result_subject.txt / result_body.txt) ---
+cat << 'EOF' > "$EMAIL_TPL_DIR/result_subject.txt"
+[APyB] Resultado Oficial: {{custom_subject|safe}}
+EOF
+
+cat << 'EOF' > "$EMAIL_TPL_DIR/result_body.txt"
+Olá, {{voter.name}},
+
+A apuração da eleição "{{voter.election.name}}" foi concluída e o resultado oficial já está disponível.
+
+{{custom_message|safe}}
+
+========================
+RESULTADOS E AUDITORIA
+========================
+
+Visualize o resultado e a tabela de auditoria em:
+{{election_url}}
+
+Hash da Eleição:
+{{voter.election.hash}}
+
+{% if voter.vote_hash %}O código rastreador (Smart Ballot Tracker) do seu voto computado é:
+{{voter.vote_hash}}
+
+Você pode verificar no centro de rastreamento da página da eleição que este código consta na lista oficial de votos apurados.{% else %}Não consta voto registrado para o seu usuário nesta eleição.{% endif %}
+
+--
+Eleições APyB (Helios Voting)
+EOF
+
+echo "3/8: Criando Dockerfile (Python 3.13 + uv + patches de Produção e Timezone)..."
 cat << 'EOF' > "$INSTALL_DIR/Dockerfile"
 FROM python:3.13-slim
 
@@ -52,12 +149,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
-COPY . /app
-
-# Instala as dependências do pyproject.toml do Helios + suporte ao Redis no Celery
+COPY pyproject.toml /app/
 RUN uv pip install --system -r pyproject.toml "celery[redis]" redis
 
-# Garante que o Celery use Redis via variável de ambiente e que o Django confie no HTTPS do Nginx
+COPY . /app
+
+# Ajustes de configurações do Django no settings.py
 RUN cat << 'PYEOF' >> settings.py
 
 import os
@@ -66,21 +163,49 @@ CELERY_BROKER_URL = BROKER_URL
 CELERY_RESULT_BACKEND = BROKER_URL
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 CSRF_TRUSTED_ORIGINS = [os.environ.get('URL_HOST', 'https://votacao.python.org.br')]
+
+# Fuso horário e idioma padrão
+TIME_ZONE = 'America/Sao_Paulo'
+LANGUAGE_CODE = 'pt-br'
+
+# Garante remetente formatado com Nome + Email no Django
+DEFAULT_FROM_NAME = os.environ.get('DEFAULT_FROM_NAME', 'Eleicoes APyB')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'eleicoes@python.org.br')
+
+# Desabilita sslmode obrigatório para o Postgres interno do Compose
+if 'OPTIONS' in DATABASES['default']:
+    DATABASES['default']['OPTIONS'].pop('sslmode', None)
+DATABASES['default']['OPTIONS'] = {'sslmode': 'disable'}
 PYEOF
 
 EXPOSE 8000
 EOF
 
-echo "3/6: Gerando arquivo .env e docker-compose.yml..."
-SECRET_KEY=$(openssl rand -base64 32)
-DB_PASS=$(openssl rand -hex 16)
-ADMIN_PASS=$(openssl rand -base64 12)
+echo "4/8: Preservando ou gerando credenciais seguras no .env..."
+EXISTING_SECRET=""
+EXISTING_DB_PASS=""
+
+if [ -f "$INSTALL_DIR/.env" ]; then
+    EXISTING_SECRET=$(grep -E '^SECRET_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2- || true)
+    EXISTING_DB_PASS=$(grep -E '^POSTGRES_PASSWORD=' "$INSTALL_DIR/.env" | cut -d= -f2- || true)
+fi
+
+if [ -n "$EXISTING_SECRET" ] && [ -n "$EXISTING_DB_PASS" ]; then
+    echo "Credenciais de banco e SECRET_KEY existentes detectadas no .env; preservando..."
+    SECRET_KEY="$EXISTING_SECRET"
+    DB_PASS="$EXISTING_DB_PASS"
+else
+    echo "Gerando novas credenciais para SECRET_KEY e PostgreSQL..."
+    SECRET_KEY=$(openssl rand -hex 32)
+    DB_PASS=$(openssl rand -hex 16)
+fi
 
 cat << EOF > "$INSTALL_DIR/.env"
 DEBUG=0
 SECRET_KEY=${SECRET_KEY}
 ALLOWED_HOSTS=${HELIOS_DOMAIN}
 URL_HOST=https://${HELIOS_DOMAIN}
+SECURE_URL_HOST=https://${HELIOS_DOMAIN}
 SECURE_SSL_REDIRECT=1
 
 POSTGRES_PASSWORD=${DB_PASS}
@@ -88,8 +213,8 @@ DATABASE_URL=postgres://helios:${DB_PASS}@db:5432/helios
 CELERY_BROKER_URL=redis://redis:6379/0
 
 HELIOS_ADMIN_ONLY=1
-SITE_TITLE=Eleicoes APyB
-WELCOME_MESSAGE=Sistema de Votacao da Associacao Python Brasil
+SITE_TITLE=Eleições APyB
+WELCOME_MESSAGE=Sistema de Votação da Associação Python Brasil
 HELP_EMAIL_ADDRESS=${ADMIN_EMAIL}
 
 AUTH_ENABLED_SYSTEMS=password
@@ -100,6 +225,7 @@ EMAIL_HOST_USER=${SMTP_USER}
 EMAIL_HOST_PASSWORD=${SMTP_PASS}
 EMAIL_USE_TLS=1
 DEFAULT_FROM_EMAIL=${FROM_EMAIL}
+DEFAULT_FROM_NAME=${FROM_NAME}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
@@ -141,6 +267,7 @@ services:
              gunicorn wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120"
 
   worker:
+    build: .
     image: helios-apyb:latest
     restart: unless-stopped
     depends_on:
@@ -155,32 +282,48 @@ volumes:
   pgdata:
 EOF
 
-echo "4/6: Subindo os containers via Docker Compose..."
-docker compose -f "$INSTALL_DIR/docker-compose.yml" up -d --build
+echo "5/8: Compilando imagem (usando cache de dependências) e atualizando containers..."
+docker compose -f "$INSTALL_DIR/docker-compose.yml" build
+docker compose -f "$INSTALL_DIR/docker-compose.yml" up -d --force-recreate web worker
 
-echo "Aguardando migrações do banco de dados..."
-sleep 10
+echo "Aguardando inicialização do container web e verificando migrações..."
+for i in {1..15}; do
+    if docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py migrate --noinput &>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py migrate --noinput
 
-echo "5/6: Criando usuário administrador ($ADMIN_USER) no Helios..."
-docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py shell << PYEOF
+echo "6/8: Verificando usuário administrador (${ADMIN_USER})..."
+NEW_ADMIN_PASS=$(openssl rand -base64 12)
+ADMIN_STATUS=$(docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py shell << PYEOF
 from helios_auth.models import User
 user, created = User.objects.get_or_create(
     user_type='password',
     user_id='${ADMIN_USER}',
     defaults={
         'name': 'APyB Admin',
-        'info': {'password': '${ADMIN_PASS}'},
+        'info': {'password': '${NEW_ADMIN_PASS}'},
         'admin_p': True
     }
 )
-if not created:
-    user.info = {'password': '${ADMIN_PASS}'}
-    user.admin_p = True
-    user.save()
+if created:
+    print("CREATED:${NEW_ADMIN_PASS}")
+else:
+    print("EXISTING:" + user.info.get('password', 'definida-anteriormente'))
 PYEOF
+)
 
-echo "6/6: Configurando Nginx e gerando certificado HTTPS via Certbot..."
-sudo tee "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" > /dev/null << EOF
+if echo "$ADMIN_STATUS" | grep -q "CREATED:"; then
+    FINAL_ADMIN_PASS=$(echo "$ADMIN_STATUS" | grep -o "CREATED:.*" | cut -d: -f2-)
+else
+    FINAL_ADMIN_PASS=$(echo "$ADMIN_STATUS" | grep -o "EXISTING:.*" | cut -d: -f2-)
+fi
+
+echo "7/8: Verificando Virtual Host no Nginx e Certificado SSL..."
+if ! grep -q "listen 443 ssl" "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" 2>/dev/null; then
+    sudo tee "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" > /dev/null << EOF
 server {
     listen 80;
     listen [::]:80;
@@ -198,22 +341,28 @@ server {
     }
 }
 EOF
+    sudo ln -sf "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" "/etc/nginx/sites-enabled/${HELIOS_DOMAIN}.conf"
+    sudo rm -f /etc/nginx/sites-enabled/default
+    sudo nginx -t
+    sudo systemctl reload nginx
 
-sudo ln -sf "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" "/etc/nginx/sites-enabled/${HELIOS_DOMAIN}.conf"
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
-
-sudo certbot --nginx \
-    -d "${HELIOS_DOMAIN}" \
-    --non-interactive \
-    --agree-tos \
-    -m "${ADMIN_EMAIL}" \
-    --redirect
+    echo "8/8: Gerando ou aplicando certificado HTTPS via Certbot..."
+    sudo certbot --nginx \
+        -d "${HELIOS_DOMAIN}" \
+        --non-interactive \
+        --agree-tos \
+        -m "${ADMIN_EMAIL}" \
+        --redirect
+else
+    sudo nginx -t
+    sudo systemctl reload nginx
+    echo "8/8: Nginx já configurado com HTTPS (443); configuração preservada."
+fi
 
 echo "=================================================================="
 echo "Helios Voting ativo em: https://${HELIOS_DOMAIN}"
 echo "Usuário Admin:          ${ADMIN_USER}"
-echo "Senha Admin:            ${ADMIN_PASS}"
-echo "Arquivo .env:           ${INSTALL_DIR}/.env"
+echo "Senha Admin:            ${FINAL_ADMIN_PASS}"
+echo "Remetente configurado:  ${FROM_NAME} <${FROM_EMAIL}>"
+echo "Templates atualizados:  vote, simple e result (em Português)"
 echo "=================================================================="

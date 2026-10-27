@@ -1,110 +1,177 @@
 #!/bin/bash
-# Script 1: Configuração Base e Hardening para Ubuntu 24.04 / 26.04 (Instância Efêmera Helios)
+# Script 1: Hardening Ubuntu 26.04 LTS + Docker + Nginx + Swap (Idempotente / Safe to Rerun)
+# Execute como root ou via: sudo ./01_hardening.sh
 
-set -e
+set -euo pipefail
 
-# ==========================================
-# CONFIGURAÇÃO - PREENCHA ANTES DE EXECUTAR
-# ==========================================
-PUBKEY="YOUR_PUBKEY_HERE"
-SSH_PORT="22022"
-# ==========================================
+ADMIN_USER="apyb"
+SWAP_SIZE="2G"
 
-if [ "$PUBKEY" = "YOUR_PUBKEY_HERE" ]; then
-    echo "ERRO: Edite este script e adicione sua chave SSH pública na variável PUBKEY antes de executar."
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERRO: Execute este script como root (sudo ./01_hardening.sh)."
     exit 1
 fi
 
-echo "1/8: Atualizando e fazendo upgrade dos pacotes do sistema..."
-apt update && apt upgrade -y
+echo "1/8: Atualizando pacotes do sistema e configurando fuso horário..."
+export DEBIAN_FRONTEND=noninteractive
+timedatectl set-timezone America/Sao_Paulo
+apt-get update && apt-get upgrade -y
 
-echo "2/8: Instalando ferramentas essenciais..."
-apt install -y ufw fail2ban unattended-upgrades curl git openssl tmux ca-certificates gnupg lsb-release nginx certbot python3-certbot-nginx vim
+echo "2/8: Instalando dependências base, Nginx, Certbot, UFW e Fail2Ban..."
+apt-get install -y \
+    ca-certificates \
+    curl \
+    gnupg \
+    git \
+    ufw \
+    fail2ban \
+    python3-systemd \
+    unattended-upgrades \
+    nginx \
+    certbot \
+    python3-certbot-nginx \
+    openssl
 
-echo "Configurando unattended-upgrades para execução automática..."
-cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-APT::Periodic::AutocleanInterval "7";
+echo "3/8: Verificando arquivo de Swap (${SWAP_SIZE})..."
+if ! swapon --show | grep -q '/swapfile'; then
+    if [ ! -f /swapfile ]; then
+        fallocate -l "$SWAP_SIZE" /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+    fi
+    swapon /swapfile
+fi
+if ! grep -q '^/swapfile ' /etc/fstab; then
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+sysctl -w vm.swappiness=10 >/dev/null
+echo 'vm.swappiness=10' > /etc/sysctl.d/99-swappiness.conf
+
+echo "4/8: Verificando usuário administrativo '${ADMIN_USER}' e chaves SSH..."
+if ! id "$ADMIN_USER" &>/dev/null; then
+    useradd -m -s /bin/bash -G sudo "$ADMIN_USER"
+fi
+
+echo "${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-${ADMIN_USER}"
+chmod 440 "/etc/sudoers.d/90-${ADMIN_USER}"
+
+mkdir -p "/home/${ADMIN_USER}/.ssh"
+# Só copia chaves SSH se o authorized_keys do apyb ainda estiver vazio
+if [ ! -s "/home/${ADMIN_USER}/.ssh/authorized_keys" ]; then
+    if [ -s /home/ubuntu/.ssh/authorized_keys ]; then
+        cp /home/ubuntu/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys"
+    elif [ -n "${SUDO_USER:-}" ] && [ -s "/home/${SUDO_USER}/.ssh/authorized_keys" ]; then
+        cp "/home/${SUDO_USER}/.ssh/authorized_keys" "/home/${ADMIN_USER}/.ssh/authorized_keys"
+    elif [ -s /root/.ssh/authorized_keys ]; then
+        cp /root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys"
+    fi
+fi
+
+chmod 700 "/home/${ADMIN_USER}/.ssh"
+if [ -f "/home/${ADMIN_USER}/.ssh/authorized_keys" ]; then
+    chmod 600 "/home/${ADMIN_USER}/.ssh/authorized_keys"
+fi
+chown -R "${ADMIN_USER}:${ADMIN_USER}" "/home/${ADMIN_USER}/.ssh"
+
+if [ ! -s "/home/${ADMIN_USER}/.ssh/authorized_keys" ]; then
+    echo "ERRO CRÍTICO: Nenhuma chave SSH encontrada para ${ADMIN_USER}. Abortando antes de bloquear o SSH."
+    exit 1
+fi
+
+echo "5/8: Verificando Docker Engine e Docker Compose (Ubuntu 26.04 DEB822)..."
+if ! command -v docker &>/dev/null; then
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    rm -f /etc/apt/sources.list.d/docker.list
+
+    CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    if ! curl -fsSL "https://download.docker.com/linux/ubuntu/dists/${CODENAME}/Release" &>/dev/null; then
+        echo "Aviso: Repositório Docker para '${CODENAME}' não encontrado; usando pacote estável 'noble'."
+        CODENAME="noble"
+    fi
+
+    cat << EOF > /etc/apt/sources.list.d/docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
 EOF
-systemctl enable --now unattended-upgrades
 
-echo "3/8: Configurando o repositório oficial do Docker..."
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
 
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
+usermod -aG docker "$ADMIN_USER"
 
-apt update
-apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+mkdir -p /etc/docker
+DAEMON_JSON_TMP=$(mktemp)
+cat << 'EOF' > "$DAEMON_JSON_TMP"
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+EOF
 
-echo "4/8: Criando o usuário 'apyb' com privilégios de sudo e docker..."
-if ! id "apyb" &>/dev/null; then
-    useradd -m -s /bin/bash apyb
+# Só reinicia o Docker se o daemon.json tiver mudado ou se o Docker estiver parado
+if ! cmp -s "$DAEMON_JSON_TMP" /etc/docker/daemon.json; then
+    mv "$DAEMON_JSON_TMP" /etc/docker/daemon.json
+    chmod 644 /etc/docker/daemon.json
+    systemctl enable --now docker
+    systemctl restart docker
 else
-    echo "Usuário 'apyb' já existe, pulando criação..."
+    rm -f "$DAEMON_JSON_TMP"
+    systemctl enable --now docker
 fi
-usermod -aG sudo,docker apyb
 
-echo "5/8: Configurando chaves SSH para o usuário 'apyb'..."
-mkdir -p /home/apyb/.ssh
-if ! grep -q "$PUBKEY" /home/apyb/.ssh/authorized_keys 2>/dev/null; then
-    echo "$PUBKEY" >> /home/apyb/.ssh/authorized_keys
-fi
-chmod 755 /home/apyb
-chmod 700 /home/apyb/.ssh
-chmod 600 /home/apyb/.ssh/authorized_keys
-chown -R apyb:apyb /home/apyb/.ssh
-
-echo "6/8: Endurecendo a configuração do SSH e Fail2ban..."
-mkdir -p /etc/ssh/sshd_config.d
-cat <<EOF > /etc/ssh/sshd_config.d/99-custom-hardening.conf
-Port $SSH_PORT
-PermitRootLogin no
-PubkeyAuthentication yes
-PasswordAuthentication no
-PermitEmptyPasswords no
-X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
-UseDNS no
-EOF
-
-cat <<EOF > /etc/fail2ban/jail.d/sshd-custom.conf
-[sshd]
-enabled = true
-port = $SSH_PORT
-maxretry = 5
-bantime = 1h
-EOF
-
-echo "7/8: Configurando e habilitando o UFW..."
+echo "6/8: Configurando Firewall (UFW) e Fail2Ban..."
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow $SSH_PORT/tcp
-ufw allow http
-ufw allow https
+ufw allow OpenSSH
+ufw allow 'Nginx Full'
 ufw --force enable
 
-echo "8/8: Habilitando serviços e aplicando configurações..."
-systemctl enable --now docker nginx fail2ban
+cat << 'EOF' > /etc/fail2ban/jail.local
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = systemd
 
-systemctl stop ssh.socket || true
-systemctl disable ssh.socket || true
-systemctl mask ssh.socket || true
-systemctl enable ssh.service
-systemctl restart ssh.service
-systemctl restart fail2ban
+[sshd]
+enabled = true
+port = ssh
+EOF
+systemctl enable --now fail2ban
+systemctl reload-or-restart fail2ban
+
+echo "7/8: Aplicando Hardening no OpenSSH..."
+cat << EOF > /etc/ssh/sshd_config.d/99-apyb-hardening.conf
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+X11Forwarding no
+MaxAuthTries 3
+AllowUsers ${ADMIN_USER} ubuntu
+EOF
+
+mkdir -p /run/sshd
+chmod 0755 /run/sshd
+sshd -t
+systemctl daemon-reload
+systemctl reload-or-restart ssh
+
+echo "8/8: Ativando atualizações automáticas de segurança..."
+dpkg-reconfigure -f noninteractive unattended-upgrades
 
 echo "=================================================================="
-echo "Setup base concluído com sucesso!"
-echo "ATENÇÃO: Defina a senha do usuário 'apyb' AGORA rodando:"
-echo "passwd apyb"
-echo ""
-echo "Não se esqueça de liberar a porta $SSH_PORT, 80 e 443 no Firewall da Cloud!"
-echo "Nova conexão: ssh -p $SSH_PORT apyb@ip_do_servidor"
+echo "Hardening do Ubuntu 26.04 LTS concluído com sucesso (Idempotente)!"
+echo "Conecte-se com: ssh ${ADMIN_USER}@$(curl -s4 ifconfig.me)"
 echo "=================================================================="
