@@ -1,6 +1,5 @@
 #!/bin/bash
 # Script 1: Hardening Ubuntu 26.04 LTS + Docker + Nginx + Swap (Idempotente / Safe to Rerun)
-# Execute como root ou via: sudo ./01_hardening.sh
 
 set -euo pipefail
 
