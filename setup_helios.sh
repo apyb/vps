@@ -14,7 +14,7 @@ SMTP_HOST="smtp.seuprovedor.com"
 SMTP_PORT="587"
 SMTP_USER="seu_usuario_smtp"
 SMTP_PASS="sua_senha_smtp"
-FROM_EMAIL="eleicoes@python.org.br"
+FROM_EMAIL="comunicacao@python.org.br"
 FROM_NAME="Eleições APyB"
 
 INSTALL_DIR="/opt/helios"
@@ -25,7 +25,7 @@ if [ "$SMTP_HOST" = "smtp.seuprovedor.com" ]; then
     exit 1
 fi
 
-echo "1/8: Clonando ou atualizando repositório do Helios em $INSTALL_DIR..."
+echo "1/7: Sincronizando código-fonte base do Helios em $INSTALL_DIR..."
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown -R apyb:apyb "$INSTALL_DIR"
 
@@ -36,8 +36,11 @@ else
     git -C "$INSTALL_DIR" reset --hard origin/master
 fi
 
-echo "2/8: Atualizando templates de comunicação com os eleitores em Português..."
+echo "2/7: Aplicando templates de e-mail em Português (mantendo Voter ID / Password)..."
 EMAIL_TPL_DIR="$INSTALL_DIR/helios/templates/email"
+SERVER_UI_EMAIL_DIR="$INSTALL_DIR/server_ui/templates/email"
+
+mkdir -p "$EMAIL_TPL_DIR" "$SERVER_UI_EMAIL_DIR"
 
 # --- ETAPA 1: Convite para votar e envio de credenciais (vote_subject.txt / vote_body.txt) ---
 cat << 'EOF' > "$EMAIL_TPL_DIR/vote_subject.txt"
@@ -53,31 +56,31 @@ Olá, {{voter.name}},
 COMO VOTAR
 ========================
 
-Url da Eleição:
+URL da Eleição:
 {{election_vote_url}}
 
-Hash de Auditoria da Eleição:
+Election Fingerprint (Hash de Auditoria):
 {{voter.election.hash}}
 
-{% if voter.voter_type == "password" %}Suas credenciais exclusivas de acesso:
-ID de Eleitor: {{voter.voter_login_id}}
-Senha: {{voter.voter_password}}
+{% if voter.voter_type == "password" %}Utilize suas credenciais exclusivas abaixo na tela de login da votação:
+Voter ID: {{voter.voter_login_id}}
+Password: {{voter.voter_password}}
 
-Caso seja solicitado a se desconectar de outra conta antes de votar, basta confirmar e utilizar as credenciais acima.{% else %}Conecte-se utilizando sua conta {{voter.voter_type}}.{% endif %}
+Caso o sistema avise que você está conectado com outra conta, confirme o logout e informe o Voter ID e Password acima.{% else %}Conecte-se utilizando sua conta {{voter.voter_type}}.{% endif %}
 
-{% if voter.vote_hash %}Você já possui um voto registrado nesta eleição com o código rastreador (Ballot Tracker):
+{% if voter.vote_hash %}Consta um voto já registrado para o seu usuário nesta eleição com o Ballot Tracker:
 {{voter.vote_hash}}
 
 Se desejar, você pode votar novamente até o encerramento da eleição; apenas o último voto enviado será contabilizado.{% endif %}
 
 --
-Eleições APyB
-Em caso de dúvidas, entre em contato: contato@python.org.br
+Eleições APyB (Helios Voting)
+Dúvidas: diretoria@python.org.br
 EOF
 
 # --- ETAPA 2: Avisos gerais / Lembretes durante a eleição (simple_subject.txt / simple_body.txt) ---
 cat << 'EOF' > "$EMAIL_TPL_DIR/simple_subject.txt"
-[APyB] Comunicado da Eleição: {{custom_subject|safe}}
+[APyB] Comunicado: {{custom_subject|safe}}
 EOF
 
 cat << 'EOF' > "$EMAIL_TPL_DIR/simple_body.txt"
@@ -86,21 +89,43 @@ Olá, {{voter.name}},
 {{custom_message|safe}}
 
 ========================
-INFORMAÇÕES DA ELEIÇÃO
+INFORMAÇÕES DE ACESSO
 ========================
 
-Página da Eleição:
+URL da Eleição:
 {{election_vote_url}}
 
-{% if voter.voter_type == "password" %}Suas credenciais de acesso:
-ID de Eleitor: {{voter.voter_login_id}}
-Senha: {{voter.voter_password}}{% endif %}
+{% if voter.voter_type == "password" %}Credenciais para votação:
+Voter ID: {{voter.voter_login_id}}
+Password: {{voter.voter_password}}{% endif %}
 
 --
-Eleições APyB
+Eleições APyB (Helios Voting)
+Dúvidas: diretoria@python.org.br
 EOF
 
-# --- ETAPA 3: Divulgação do Resultado Final e Auditoria (result_subject.txt / result_body.txt) ---
+# --- ETAPA 3: Confirmação de Voto Computado / Recibo (cast_vote_subject.txt / cast_vote_body.txt) ---
+cat << 'EOF' > "$SERVER_UI_EMAIL_DIR/cast_vote_subject.txt"
+[APyB] Voto registrado ({{custom_subject|safe}})
+EOF
+
+cat << 'EOF' > "$SERVER_UI_EMAIL_DIR/cast_vote_body.txt"
+Olá, {{voter.name}},
+
+Você registrou seu voto com sucesso na eleição "{{election.name}}".
+
+O seu Ballot Tracker (código rastreador de cédula) é:
+{{cast_vote.vote_hash}}
+
+Sua cédula criptografada está arquivada para auditoria pública em:
+{{cast_vote_url}}
+
+--
+Eleições APyB (Helios Voting)
+Dúvidas: diretoria@python.org.br
+EOF
+
+# --- ETAPA 4: Divulgação do Resultado Final e Auditoria (result_subject.txt / result_body.txt) ---
 cat << 'EOF' > "$EMAIL_TPL_DIR/result_subject.txt"
 [APyB] Resultado Oficial: {{custom_subject|safe}}
 EOF
@@ -116,22 +141,23 @@ A apuração da eleição "{{voter.election.name}}" foi concluída e o resultado
 RESULTADOS E AUDITORIA
 ========================
 
-Visualize o resultado e a tabela de auditoria em:
+Visualize o resultado e o painel de auditoria em:
 {{election_url}}
 
-Hash da Eleição:
+Election Fingerprint (Hash da Eleição):
 {{voter.election.hash}}
 
-{% if voter.vote_hash %}O código rastreador (Smart Ballot Tracker) do seu voto computado é:
+{% if voter.vote_hash %}O Ballot Tracker do seu voto computado na urna é:
 {{voter.vote_hash}}
 
-Você pode verificar no centro de rastreamento da página da eleição que este código consta na lista oficial de votos apurados.{% else %}Não consta voto registrado para o seu usuário nesta eleição.{% endif %}
+Você pode conferir na lista de cédulas apuradas da eleição que o seu Ballot Tracker foi devidamente incluído na contagem.{% else %}Não consta voto registrado para o seu usuário nesta eleição.{% endif %}
 
 --
 Eleições APyB (Helios Voting)
+Dúvidas: diretoria@python.org.br
 EOF
 
-echo "3/8: Criando Dockerfile (Python 3.13 + uv + patches de Produção e Timezone)..."
+echo "3/7: Criando Dockerfile (Python 3.13 + uv + configurações de Produção)..."
 cat << 'EOF' > "$INSTALL_DIR/Dockerfile"
 FROM python:3.13-slim
 
@@ -170,7 +196,7 @@ LANGUAGE_CODE = 'pt-br'
 
 # Garante remetente formatado com Nome + Email no Django
 DEFAULT_FROM_NAME = os.environ.get('DEFAULT_FROM_NAME', 'Eleicoes APyB')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'eleicoes@python.org.br')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'comunicacao@python.org.br')
 
 # Desabilita sslmode obrigatório para o Postgres interno do Compose
 if 'OPTIONS' in DATABASES['default']:
@@ -181,7 +207,7 @@ PYEOF
 EXPOSE 8000
 EOF
 
-echo "4/8: Preservando ou gerando credenciais seguras no .env..."
+echo "4/7: Preservando ou gerando credenciais seguras no .env..."
 EXISTING_SECRET=""
 EXISTING_DB_PASS=""
 
@@ -191,11 +217,11 @@ if [ -f "$INSTALL_DIR/.env" ]; then
 fi
 
 if [ -n "$EXISTING_SECRET" ] && [ -n "$EXISTING_DB_PASS" ]; then
-    echo "Credenciais de banco e SECRET_KEY existentes detectadas no .env; preservando..."
+    echo " -> Credenciais de banco e SECRET_KEY existentes detectadas no .env; preservando..."
     SECRET_KEY="$EXISTING_SECRET"
     DB_PASS="$EXISTING_DB_PASS"
 else
-    echo "Gerando novas credenciais para SECRET_KEY e PostgreSQL..."
+    echo " -> Gerando novas credenciais para SECRET_KEY e PostgreSQL..."
     SECRET_KEY=$(openssl rand -hex 32)
     DB_PASS=$(openssl rand -hex 16)
 fi
@@ -282,7 +308,7 @@ volumes:
   pgdata:
 EOF
 
-echo "5/8: Compilando imagem (usando cache de dependências) e atualizando containers..."
+echo "5/7: Compilando imagem atualizada e recriando containers web e worker..."
 docker compose -f "$INSTALL_DIR/docker-compose.yml" build
 docker compose -f "$INSTALL_DIR/docker-compose.yml" up -d --force-recreate web worker
 
@@ -295,7 +321,7 @@ for i in {1..15}; do
 done
 docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py migrate --noinput
 
-echo "6/8: Verificando usuário administrador (${ADMIN_USER})..."
+echo "6/7: Verificando usuário administrador (${ADMIN_USER})..."
 NEW_ADMIN_PASS=$(openssl rand -base64 12)
 ADMIN_STATUS=$(docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T web python manage.py shell << PYEOF
 from helios_auth.models import User
@@ -321,7 +347,7 @@ else
     FINAL_ADMIN_PASS=$(echo "$ADMIN_STATUS" | grep -o "EXISTING:.*" | cut -d: -f2-)
 fi
 
-echo "7/8: Verificando Virtual Host no Nginx e Certificado SSL..."
+echo "7/7: Verificando Virtual Host no Nginx e Certificado SSL..."
 if ! grep -q "listen 443 ssl" "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" 2>/dev/null; then
     sudo tee "/etc/nginx/sites-available/${HELIOS_DOMAIN}.conf" > /dev/null << EOF
 server {
@@ -346,7 +372,6 @@ EOF
     sudo nginx -t
     sudo systemctl reload nginx
 
-    echo "8/8: Gerando ou aplicando certificado HTTPS via Certbot..."
     sudo certbot --nginx \
         -d "${HELIOS_DOMAIN}" \
         --non-interactive \
@@ -356,7 +381,7 @@ EOF
 else
     sudo nginx -t
     sudo systemctl reload nginx
-    echo "8/8: Nginx já configurado com HTTPS (443); configuração preservada."
+    echo " -> Nginx já configurado com HTTPS (443); configuração preservada."
 fi
 
 echo "=================================================================="
@@ -364,5 +389,5 @@ echo "Helios Voting ativo em: https://${HELIOS_DOMAIN}"
 echo "Usuário Admin:          ${ADMIN_USER}"
 echo "Senha Admin:            ${FINAL_ADMIN_PASS}"
 echo "Remetente configurado:  ${FROM_NAME} <${FROM_EMAIL}>"
-echo "Templates atualizados:  vote, simple e result (em Português)"
+echo "Templates atualizados:  vote, simple, cast_vote e result"
 echo "=================================================================="
